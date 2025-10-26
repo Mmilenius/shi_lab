@@ -1,88 +1,111 @@
-import torch
-from PIL import Image
-import requests
-from transformers import AutoImageProcessor, AutoModelForImageClassification
-import warnings
+import tensorflow as tf
+from tensorflow.keras import layers, Model
+from tensorflow.keras.applications import MobileNetV2
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+import numpy as np
+import matplotlib.pyplot as plt
+import os
 
-# Ігнорувати попередження, які не впливають на результат
-warnings.filterwarnings("ignore")
+# --- Налаштування ---
+IMG_SIZE = (224, 224)
+BATCH_SIZE = 32
+DATA_DIR = 'datasets/real_and_fake_face'
+CLASSES = ['training_real', 'training_fake']
 
-# --- 1. Налаштування ---
-print("Завантаження моделі та процесора...")
+# --- Перевірка шляху ---
+if not os.path.exists(DATA_DIR):
+    raise FileNotFoundError(f"❌ Не знайдено шлях: {DATA_DIR}")
 
-model_name = "dima806/deepfake_vs_real_image_detection"
+print(f"✅ Знайдено папку з даними: {DATA_DIR}")
 
-try:
-    processor = AutoImageProcessor.from_pretrained(model_name)
-    model = AutoModelForImageClassification.from_pretrained(model_name)
-except Exception as e:
-    print(f"Не вдалося завантажити модель: {e}")
-    exit()
+# --- Побудова моделі ---
+base = MobileNetV2(include_top=False, input_shape=(*IMG_SIZE, 3), weights='imagenet')
+base.trainable = False  # заморожуємо базову частину
 
-labels = model.config.id2label
-print(f"Модель завантажена. Класи: {labels}")
+x = base.output
+x = layers.GlobalAveragePooling2D()(x)
+x = layers.Dense(128, activation='relu')(x)
+x = layers.Dropout(0.3)(x)
+out = layers.Dense(1, activation='sigmoid')(x)
+model = Model(base.input, out)
 
+model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+model.summary()
 
-# --- 2. Допоміжна функція для аналізу ---
+# --- Підготовка даних ---
+datagen = ImageDataGenerator(rescale=1. / 255, validation_split=0.2)
 
-def detect_deepfake(image_url):
-    """
-    Завантажує зображення з URL, обробляє його
-    та повертає прогноз моделі.
-    """
-    try:
-        # -------------------------------------------------------------------
-        # ОНОВЛЕНО: Додаємо User-Agent, щоб імітувати запит браузера
-        # -------------------------------------------------------------------
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
+train_gen = datagen.flow_from_directory(
+    DATA_DIR,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='binary',
+    classes=CLASSES,
+    subset='training'
+)
 
-        print(f"Обробка: {image_url[:50]}...")
-        # Передаємо 'headers' у запит
-        response = requests.get(image_url, stream=True, headers=headers)
+val_gen = datagen.flow_from_directory(
+    DATA_DIR,
+    target_size=IMG_SIZE,
+    batch_size=BATCH_SIZE,
+    class_mode='binary',
+    classes=CLASSES,
+    subset='validation'
+)
 
-        # Перевіряємо, чи успішний запит
-        if response.status_code != 200:
-            return f"Помилка: Не вдалося завантажити (Код: {response.status_code})", 0
+# --- Навчання ---
+print("\n🚀 Починаємо навчання...")
+history = model.fit(
+    train_gen,
+    validation_data=val_gen,
+    epochs=10,
+    steps_per_epoch=train_gen.samples // BATCH_SIZE,
+    validation_steps=val_gen.samples // BATCH_SIZE
+)
 
-        # Відкриваємо зображення з отриманих даних
-        image = Image.open(response.raw).convert("RGB")
+# --- Збереження ---
+model.save('deepfake_detector.h5')
+print("✅ Модель збережено як 'deepfake_detector.h5'")
 
-        # Обробка зображення для моделі
-        inputs = processor(images=image, return_tensors="pt")
+# --- Оцінка на валідації ---
+val_loss, val_acc = model.evaluate(val_gen)
+print(f"\n📊 Точність на валідаційних даних: {val_acc * 100:.2f}%")
 
-        # Вимкнення розрахунку градієнтів для пришвидшення
-        with torch.no_grad():
-            outputs = model(**inputs)
+# --- Графік точності і втрат ---
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+plt.plot(history.history['accuracy'], label='Train acc')
+plt.plot(history.history['val_accuracy'], label='Val acc')
+plt.title('Точність')
+plt.legend()
 
-        logits = outputs.logits
-        predicted_class_idx = logits.argmax(-1).item()
-        probability = torch.nn.functional.softmax(logits, dim=1)[0][predicted_class_idx].item()
+plt.subplot(1, 2, 2)
+plt.plot(history.history['loss'], label='Train loss')
+plt.plot(history.history['val_loss'], label='Val loss')
+plt.title('Втрата')
+plt.legend()
+plt.show()
 
-        return labels[predicted_class_idx], probability
+# --- Тестування на кількох зображеннях ---
+import random
 
-    except Exception as e:
-        # Якщо помилка все одно виникає, виводимо її
-        return f"Помилка обробки зображення: {e}", 0
+# Вибираємо 6 випадкових зображень із валідаційного набору
+sample_images, sample_labels = next(val_gen)
+idxs = random.sample(range(len(sample_images)), 6)
 
+plt.figure(figsize=(12, 6))
+for i, idx in enumerate(idxs):
+    img = sample_images[idx]
+    true_label = int(sample_labels[idx])
+    pred = model.predict(img[np.newaxis, ...])[0][0]
+    pred_label = 1 if pred >= 0.5 else 0
 
-# --- 3. Проведення тесту ---
+    color = 'green' if pred_label == true_label else 'red'
+    plt.subplot(2, 3, i + 1)
+    plt.imshow(img)
+    plt.title(f"Pred: {'Fake' if pred_label else 'Real'}\n({pred:.2f})", color=color)
+    plt.axis('off')
 
-print("\n--- Початок тестування ---")
-
-# Зразок 1: Справжнє зображення
-real_image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/a/a3/Audrey_Hepburn_in_Breakfast_at_Tiffany%27s_1.jpg/800px-Audrey_Hepburn_in_Breakfast_at_Tiffany%27s_1.jpg"
-
-print(f"\n🔍 Аналіз Зразка 1 (Справжнє фото):")
-result_real, prob_real = detect_deepfake(real_image_url)
-print(f"➡️ Вердикт моделі: {result_real} (Ймовірність: {prob_real * 100:.2f}%)")
-
-# Зразок 2: Згенероване (фейкове) зображення
-fake_image_url = "https://this-person-does-not-exist.com/img/avatar-gen112b0785c4906f360f0e30931d8c1c51.jpg"
-
-print(f"\n🔍 Аналіз Зразка 2 (Згенероване фото):")
-result_fake, prob_fake = detect_deepfake(fake_image_url)
-print(f"➡️ Вердикт моделі: {result_fake} (Ймовірність: {prob_fake * 100:.2f}%)")
-
-print("\n--- Тестування завершено ---")
+plt.suptitle("🔍 Результати розпізнавання (зелений = правильно)")
+plt.show()
+s
