@@ -14,7 +14,6 @@ print(f"Використовується пристрій: {device}")
 class PhysicsInformedNN(nn.Module):
     def __init__(self, layers):
         super(PhysicsInformedNN, self).__init__()
-
         self.layers = nn.ModuleList()
         for i in range(len(layers) - 1):
             self.layers.append(nn.Linear(layers[i], layers[i + 1]))
@@ -85,10 +84,11 @@ def loss_components(model, D, x_pde, t_pde, x_ic, t_ic, c_ic, x_bc, t_bc, c_bc):
 
 
 # 3. Підготовка даних та тренування
-# Параметри завдання (Варіант 3)
-D_val = 0.2  # Коеф. дифузії
+# --- Зміни для Варіанту 2 ---
+D_val = 0.05  # Коеф. дифузії
 x_domain = [-1.0, 1.0]  # Межі області x
 t_domain = [0.0, 1.0]  # Моделюємо до T=1.0
+# ------------------------------
 
 # Кількість точок
 N_pde = 10000  # Точки для фізики (collocation points)
@@ -103,20 +103,28 @@ t_pde = torch.tensor(pde_samples[:, 1:2] * (t_domain[1] - t_domain[0]) + t_domai
 # 2. Генерація точок IC (t=0)
 x_ic = torch.tensor(lhs(1, N_ic) * (x_domain[1] - x_domain[0]) + x_domain[0], dtype=torch.float32).to(device)
 t_ic = torch.zeros_like(x_ic).to(device)
-# C(x, 0) = 1 - x^2
-c_ic = (1.0 - x_ic ** 2).to(device)
+
+# --- Зміни для Варіанту 2 ---
+# C(x, 0) = exp(-x^2)
+c_ic = torch.exp(-(x_ic ** 2)).to(device)  #
+# ------------------------------
 
 # 3. Генерація точок BC (x=-1 та x=1)
 t_bc = torch.tensor(lhs(1, N_bc) * (t_domain[1] - t_domain[0]) + t_domain[0], dtype=torch.float32).to(device)
-# C(-1, t) = 0
+
+# C(-1, t) = exp(-1)
 x_bc_left = torch.full_like(t_bc, x_domain[0]).to(device)
-# C(1, t) = 0
+# C(1, t) = exp(-1)
 x_bc_right = torch.full_like(t_bc, x_domain[1]).to(device)
 
 x_bc = torch.cat([x_bc_left, x_bc_right], dim=0)
 t_bc = torch.cat([t_bc, t_bc], dim=0)
-# c_bc = 0
-c_bc = torch.zeros_like(x_bc).to(device)
+
+# --- Зміни для Варіанту 2 ---
+# c_bc = exp(-1)
+c_bc_value = np.exp(-1.0)
+c_bc = torch.full_like(x_bc, c_bc_value).to(device)
+# ------------------------------
 
 # Ініціалізація моделі
 layers = [2, 40, 40, 40, 40, 1]  # 2 входи (x, t), 4 приховані шари, 1 вихід (C)
@@ -132,7 +140,7 @@ lambda_bc = 100.0  # Вага для BC
 
 print("Початок тренування...")
 start_time = time.time()
-epochs = 15000
+epochs = 15000  # [cite: 49]
 
 for epoch in range(epochs + 1):
     optimizer.zero_grad()
@@ -153,7 +161,7 @@ for epoch in range(epochs + 1):
     loss_history['ic'].append(loss_ic.item())
     loss_history['bc'].append(loss_bc.item())
 
-    if epoch % 1000 == 0:
+    if epoch % 1000 == 0:  # [cite: 50]
         print(f'Epoch {epoch}: Total Loss = {total_loss.item():.6f}, '
               f'PDE Loss = {loss_pde.item():.6f}, '
               f'IC Loss = {loss_ic.item():.6f}, '
@@ -163,7 +171,6 @@ end_time = time.time()
 print(f"Тренування завершено за {end_time - start_time:.2f} сек.")
 
 # 4. Візуалізація результатів
-
 # 4.1. Графіки втрат
 plt.figure(figsize=(12, 6))
 plt.plot(loss_history['total'], label='Загальні втрати (Total)')
@@ -176,7 +183,7 @@ plt.yscale('log')
 plt.title('Історія втрат під час навчання PINN')
 plt.legend()
 plt.grid(True)
-plt.show()
+plt.savefig("variant2_losses.png")  # Збереження графіка
 
 # 4.2. 3D візуалізація розв'язку
 model.eval()
@@ -199,17 +206,21 @@ ax.plot_surface(X, T, C, cmap='viridis', rstride=1, cstride=1)
 ax.set_xlabel('x (простір)')
 ax.set_ylabel('t (час)')
 ax.set_zlabel('C(x, t) (концентрація)')
-ax.set_title('PINN розв\'язок 1D дифузії ($C(x, 0) = 1 - x^2$)')
+# --- Зміни для Варіанту 2 ---
+ax.set_title('PINN розв\'язок 1D дифузії ($C(x, 0) = e^{-x^{2}}$)')
+# ------------------------------
 ax.view_init(30, -120)
-plt.show()
+plt.savefig("variant2_3d_plot.png")  # Збереження графіка
 
 # 4.3. 2D зрізи для порівняння
 plt.figure(figsize=(10, 6))
 
 # t = 0 (порівняння з IC)
 C_t0_pred = C[0, :]
-C_t0_analytical = 1.0 - x_plot ** 2
-plt.plot(x_plot, C_t0_analytical, 'r--', label='Аналітична $C(x, 0) = 1 - x^2$')
+# --- Зміни для Варіанту 2 ---
+C_t0_analytical = np.exp(-(x_plot ** 2))
+plt.plot(x_plot, C_t0_analytical, 'r--', label='Аналітична $C(x, 0) = e^{-x^{2}}$')
+# ------------------------------
 plt.plot(x_plot, C_t0_pred, 'b-', label='PINN прогноз $C(x, 0)$')
 
 # Інші часові зрізи
@@ -222,4 +233,6 @@ plt.ylabel('Концентрація C')
 plt.title('Порівняння зрізів концентрації в різні моменти часу')
 plt.legend()
 plt.grid(True)
-plt.show()
+plt.savefig("variant2_2d_slices.png")  # Збереження графіка
+
+print("\nГрафіки збережено у файли: variant2_losses.png, variant2_3d_plot.png, variant2_2d_slices.png")

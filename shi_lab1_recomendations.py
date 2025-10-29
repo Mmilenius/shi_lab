@@ -1,62 +1,51 @@
 import pandas as pd
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import linear_kernel
+import numpy as np
 
-# Список імен для всіх колонок файлу u.item
+# Завантаження даних
+ratings_cols = ['user_id', 'movie_id', 'rating', 'timestamp']
+ratings = pd.read_csv('http://files.grouplens.org/datasets/movielens/ml-100k/u.data', sep='\t', names=ratings_cols)
+
 movies_cols = ['movie_id', 'title', 'release_date', 'video_release_date', 'IMDb_URL', 'unknown', 'Action', 'Adventure',
                'Animation', 'Childrens', 'Comedy', 'Crime', 'Documentary', 'Drama', 'Fantasy', 'Film-Noir', 'Horror',
                'Musical', 'Mystery', 'Romance', 'Sci-Fi', 'Thriller', 'War', 'Western']
+movies = pd.read_csv('http://files.grouplens.org/datasets/movielens/ml-100k/u.item', sep='|', names=movies_cols, encoding='latin-1')
 
-# Завантаження даних з правильними іменами колонок
-movies = pd.read_csv(
-    'http://files.grouplens.org/datasets/movielens/ml-100k/u.item',
-    sep='|',
-    names=movies_cols,
-    encoding='latin-1'
-)
+# Об'єднання даних
+data = pd.merge(ratings, movies, on='movie_id')
+print("Приклад даних після об'єднання:")
+print(data.head())
 
-# Створення єдиного рядка з назвами жанрів для кожного фільму
-# Ми починаємо з 5-ї колонки ('unknown'), щоб захопити всі жанри
-genre_columns = movies.columns[5:]
-movies['genres_str'] = movies[genre_columns].apply(
-    lambda row: ' '.join(genre_columns[row.astype(bool)].values),
-    axis=1
-)
+# Створення матриці
+user_item_matrix = data.pivot_table(index='user_id', columns='title', values='rating')
+print("\nРозмір матриці користувач-фільм:", user_item_matrix.shape)
 
-# Векторизація жанрів за допомогою TF-IDF
-# stop_words='english' тут не є критичним, але залишено для повноти
-tfidf = TfidfVectorizer(stop_words='english')
-tfidf_matrix = tfidf.fit_transform(movies['genres_str'])
+# --- Змінено фільм для аналізу ---
+target_movie = 'Pulp Fiction (1994)'
+print(f"\n--- Пошук рекомендацій для фільму '{target_movie}' ---")
+# ------------------------------------
 
-# Обчислення матриці косинусної схожості
-cosine_sim = linear_kernel(tfidf_matrix, tfidf_matrix)
+# Перевірка, чи фільм існує в матриці
+if target_movie not in user_item_matrix.columns:
+    print(f"Фільм '{target_movie}' не знайдено в датасеті.")
+else:
+    # Обчислення кореляції
+    movie_ratings = user_item_matrix[target_movie]
+    # Використовуємо 'pearson' кореляцію, мінімум 50 спільних оцінок для надійності
+    similar_to_movie = user_item_matrix.corrwith(movie_ratings, method='pearson', min_periods=50)
 
-# Створення індексів для швидкого пошуку фільмів за назвою
-indices = pd.Series(movies.index, index=movies['title']).drop_duplicates()
+    recommendations = pd.DataFrame(similar_to_movie, columns=['Correlation'])
+    recommendations.dropna(inplace=True)
 
-def get_recommendations(title, cosine_sim=cosine_sim):
-    """
-    Функція для отримання рекомендацій на основі схожості жанрів.
-    """
-    # Отримання індексу фільму за його назвою
-    try:
-        idx = indices[title]
-    except KeyError:
-        return "Фільм з такою назвою не знайдено."
+    # Додавання кількості рейтингів для фільтрації
+    ratings_count = pd.DataFrame(data.groupby('title')['rating'].count())
+    ratings_count.rename(columns={'rating': 'ratings_count'}, inplace=True)
 
-    # Отримання пар (індекс, схожість) для всіх фільмів
-    sim_scores = list(enumerate(cosine_sim[idx]))
+    recommendations = recommendations.join(ratings_count)
 
-    # Сортування фільмів за спаданням схожості
-    sim_scores = sorted(sim_scores, key=lambda x: x[1], reverse=True)
+    # Фільтруємо за популярністю (понад 100 оцінок) та сортуємо
+    # Змінив поріг на 100 для кращої фільтрації менш відомих фільмів
+    top_recommendations = recommendations[recommendations['ratings_count'] > 100].sort_values('Correlation', ascending=False)
 
-    # Вибір 10 найбыльш схожих фільмів (ігноруючи сам фільм, який є на першому місці)
-    sim_scores = sim_scores[1:11]
-    movie_indices = [i[0] for i in sim_scores]
-
-    # Повернення назв рекомендованих фільмів
-    return movies['title'].iloc[movie_indices]
-
-# Приклад виклику для фільму 'Toy Story (1995)'
-print("--- Рекомендації для фільму 'Toy Story (1995)' ---")
-print(get_recommendations('Toy Story (1995)'))
+    print(f"\nТоп-10 рекомендованих фільмів (схожих на '{target_movie}'):")
+    # Виключаємо сам фільм зі списку рекомендацій
+    print(top_recommendations.drop(target_movie, errors='ignore').head(10))
